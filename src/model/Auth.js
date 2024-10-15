@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { union } = require("zod");
 
 const { Schema } = mongoose;
 
@@ -30,6 +31,7 @@ const UserSchema = Schema({
   },
   username: {
     type: String,
+    unique: true,
     required: true,
   },
 });
