@@ -29,7 +29,7 @@ async function handleSignUp(req, res) {
     password = await bcrypt.hash(password, salt);
   
         const response = await User.create({email, password, username});
-      res.status(200).json(response);
+      res.status(200).json(response, checkIfUserAlreadyExit);
       console.log('success');
   
     } catch (error) {
