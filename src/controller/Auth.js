@@ -21,7 +21,8 @@ async function handleSignUp(req, res) {
          if(checkIfUserAlreadyExit == email){
              return res.status(400).json({message:"User already exist"})
          }
-         if (checkIfUserAlreadyExit == username) {
+         const checkIfUserAlreadyExit2 = await User.find({username})
+         if (checkIfUserAlreadyExit2 == username) {
           return res.status(400).json({message: "Username taken Already"}) 
          }
       const salt = await bcrypt.genSalt();
