@@ -18,7 +18,7 @@ async function handleSignUp(req, res) {
       }
   
          const checkIfUserAlreadyExit = await User.find({email})
-         if(checkIfUserAlreadyExit == email){
+         if(checkIfUserAlreadyExit == email || checkIfUserAlreadyExit == username){
              return res.status(400).json({message:"User already exist"})
          }
         
@@ -28,8 +28,8 @@ async function handleSignUp(req, res) {
     password = await bcrypt.hash(password, salt);
   
         const response = await User.create({email, password, username});
-      res.status(200).json(response);
-      console.log('success');
+      res.status(200).json("response");
+      console.log(checkIfUserAlreadyExit.username);
   
     } catch (error) {
       res.status(500).json({ error: "error creating data", error });
