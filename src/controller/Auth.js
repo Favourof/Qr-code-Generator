@@ -11,9 +11,9 @@ const createToken = (id, email) => {
 
 
 async function handleSignUp(req, res) {
-    let {  email,  password, } = req.body;
+    let {  email,  password, username } = req.body;
     try {
-      if (!email || !password) {
+      if (!email || !password || !username) {
         return res.status(404).json({message: "Enter Your Details"})
       }
   
@@ -21,11 +21,14 @@ async function handleSignUp(req, res) {
          if(checkIfUserAlreadyExit == email){
              return res.status(400).json({message:"User already exist"})
          }
+         if (checkIfUserAlreadyExit == username) {
+          return res.status(400).json({message: "Username taken Already"}) 
+         }
       const salt = await bcrypt.genSalt();
   
     password = await bcrypt.hash(password, salt);
   
-        const response = await User.create({email, password});
+        const response = await User.create({email, password, username});
       res.status(200).json(response);
       console.log('success');
   
@@ -61,9 +64,9 @@ async function handleSignUp(req, res) {
         return res.status(404).json({ message: "invalid login Credentail" });
       }
   
-      if(userDetails.isEmailVeried == false){
-        return res.status(404).json({message: "your Account is not Verify"})
-    }
+    //   if(userDetails.isEmailVeried == false){
+    //     return res.status(404).json({message: "your Account is not Verify"})
+    // }
 
        //  creating a token for login user with jwt
        const token = createToken(userDetails._id, userDetails.email);

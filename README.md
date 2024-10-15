@@ -119,7 +119,7 @@ Assuming the backend is hosted at `http://localhost:your-port`, you can make req
              "dinner": true
            }
          },
-         ...
+         
        ]
      }
      ```
