@@ -96,15 +96,16 @@ async function scanQRCode(req, res) {
 
     // Determine the meal type based on the current time
     let mealTime;
-    if (currentHour >= 6 && currentHour < 10) {
+    if (currentHour >= 7 && currentHour < 12) {
       mealTime = 'breakfast';
-    } else if (currentHour >= 12 && currentHour < 14) {
+    } else if (currentHour >= 12 && currentHour < 16) {
       mealTime = 'lunch';
-    } else if (currentHour >= 18 && currentHour < 21) {
+    } else if (currentHour >= 16 && currentHour < 24) {
       mealTime = 'dinner';
     } else {
       return res.status(400).json({ error: 'Not within meal times (breakfast, lunch, or dinner)' });
     }
+    
 
     // Check if the meal was already scanned today
     if (!qrCode.scanHistory[mealTime]) {
@@ -273,6 +274,26 @@ async function deleteQRCode(req, res) {
   }
 }
 
+// get all qr-code
+async function  getAllQrcode(req, res) {
+  console.log('hello worhd');
+  
+  try {
+    const allcode = await QRCodeModel.find()
+
+    if (allcode) {
+      console.log(allcode);
+      
+      res.status(200).json({message: allcode})
+    }
+     
+  } catch (error) {
+    console.log(error);
+    res.status(500).json({ error: error.message})
+    
+  }
+  
+}
 
 module.exports = {
   generateQRCode,
@@ -281,5 +302,6 @@ module.exports = {
   blockQRCode,
   unblockQRCode,
   getTodayMealStatus,
-  deleteQRCode
+  deleteQRCode,
+  getAllQrcode
 };

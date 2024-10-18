@@ -1,6 +1,6 @@
 const express = require('express');
 
-const { generateQRCode, scanQRCode, getScanHistory, unblockQRCode, blockQRCode, getTodayMealStatus, deleteQRCode } = require('../controller/QRCode');
+const { generateQRCode, scanQRCode, getScanHistory, unblockQRCode, blockQRCode, getTodayMealStatus, deleteQRCode, getAllQrcode } = require('../controller/QRCode');
 const route = express.Router();
 // Route to generate a new QR code
 route.post('/generate', generateQRCode);
@@ -9,6 +9,8 @@ route.post('/generate', generateQRCode);
 route.post('/scan', scanQRCode);
 
 route.get('/history/:qrNumber', getScanHistory);
+
+route.get('/allhistory', getAllQrcode)
 
 // Route to block a QR code
 route.post('/block', blockQRCode);
