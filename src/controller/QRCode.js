@@ -103,7 +103,7 @@ async function scanQRCode(req, res) {
     } else if (currentHour >= 16 && currentHour < 24) {
       mealTime = 'dinner';
     } else {
-      return res.status(200).json({ error: 'Not within meal times (breakfast, lunch, or dinner)' });
+      return res.status(404).json({ error: 'Not within meal times (breakfast, lunch, or dinner)' });
     }
     
 
@@ -111,7 +111,7 @@ async function scanQRCode(req, res) {
     if (!qrCode.scanHistory[mealTime]) {
       qrCode.scanHistory[mealTime] = true; // Mark the meal as taken
     } else {
-      return res.status(200).json({ error: `${mealTime} already taken today` });
+      return res.status(404).json({ error: `${mealTime} already taken today` });
     }
 
     // If dinner is scanned, save the history for today
