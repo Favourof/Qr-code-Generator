@@ -1,0 +1,11 @@
+config:
+  target: "https://qr-code-generator-objk.onrender.com"
+  phases:
+    - duration: 30
+      arrivalRate: 100
+scenarios:
+  - flow:
+      - post:
+          url: "/api/v1/scan"
+          json:
+            qrNumber: "001"
