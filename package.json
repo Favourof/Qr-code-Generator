@@ -16,12 +16,8 @@
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-<<<<<<< HEAD
     "express": "^4.19.2",
     "express-rate-limit": "^7.5.1",
-=======
-    "express": "^4.21.2",
->>>>>>> 30fe1de12ae17b07b024fa81cc498cec9992d16a
     "express-validator": "^7.2.0",
     "firebase-admin": "^13.4.0",
     "ioredis": "^5.6.1",
