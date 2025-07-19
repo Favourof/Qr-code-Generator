@@ -1,141 +1,180 @@
 const QRCodeLib = require("qrcode");
 const QRCodeModel = require("../model/QRCode"); // Importing the model
 const HistoryModel = require("../model/history");
+const redis = require("../utils/redis");
+const bucket = require("../utils/firebase"); // Firebase storage bucket
+const { v4: uuidv4 } = require("uuid");
+const path = require("path");
 
-// Generate QR Code with sequential numbering and unique identifier
+// Generate QR Code and store image in Firebase
 async function generateQRCode(req, res) {
   try {
-    // Find the last generated QR code to determine the next number
     const lastQRCode = await QRCodeModel.findOne().sort({ createdAt: -1 });
 
-    // Initialize scan history for breakfast, lunch, and dinner
-    const scanHistory = {
-      breakfast: false,
-      lunch: false,
-      dinner: false,
-    };
+    const scanHistory = { breakfast: false, lunch: false, dinner: false };
 
-    // Get the last QR number and increment it
-    let nextNumber = "001"; // Start from 001 if there is no previous QR code
+    let nextNumber = "001";
     if (lastQRCode) {
       let lastNumber = parseInt(lastQRCode.qrNumber);
-      nextNumber = String(lastNumber + 1).padStart(3, "0"); // Increment and pad with leading zeros
+      nextNumber = String(lastNumber + 1).padStart(3, "0");
     }
 
-    // Generate the QR code data (you can pass custom data or a unique identifier)
-    const qrData = `QR Code #${nextNumber}`; // Use the sequential number as the identifier
-    const qrCodeImage = await QRCodeLib.toDataURL(qrData); // Generate the QR code image
+    // Generate buffer
+    const qrBuffer = await QRCodeLib.toBuffer(`QR Code #${nextNumber}`);
 
-    // Create the new QR code document
+    // Unique file name
+    const fileName = `qr-code-${nextNumber}-${uuidv4()}.png`;
+    const file = bucket.file(`qr-codes/${fileName}`);
+
+    // Upload to Firebase
+    await file.save(qrBuffer, {
+      metadata: {
+        contentType: "image/png",
+        metadata: {
+          firebaseStorageDownloadTokens: uuidv4(),
+        },
+      },
+    });
+
+    // Make public (optional)
+    await file.makePublic();
+
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/qr-codes/${fileName}`;
+
     const newQRCode = new QRCodeModel({
       qrNumber: nextNumber,
-      qrCodeData: qrCodeImage, // Store the generated QR code image
-      scanHistory, // Initialize the scan history for breakfast, lunch, and dinner
+      qrCodeData: publicUrl, // Save link instead of base64
+      scanHistory,
       scanDate: null,
     });
 
-    // Save the generated QR code to the database
     await newQRCode.save();
 
-    // Return the generated QR code details in the response
+    // Redis update (same logic)
+    const cacheKey = "all-qr-codes";
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        const qrList = JSON.parse(cached);
+        qrList.push(newQRCode);
+        await redis.set(cacheKey, JSON.stringify(qrList), "EX", 300);
+      }
+    } catch (err) {
+      console.error("Redis update failed:", err);
+    }
+
     res.status(200).json({
-      message: "QR Code generated successfully",
+      message: "QR Code generated and uploaded successfully",
       qrCode: newQRCode,
     });
-  } catch (error) {
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Error generating QR Code" });
-    console.log(error);
   }
 }
 
 // Function to handle QR Code scanning and save daily history
 async function scanQRCode(req, res) {
   try {
-    const qrCodeNumber = req.body.qrNumber; // Get the QR code number from the request body
-
-    // Find the QR code by its number
+    const qrCodeNumber = req.body.qrNumber;
     const qrCode = await QRCodeModel.findOne({ qrNumber: qrCodeNumber });
 
-    if (!qrCode) {
-      return res.status(404).json({ error: "QR Code not found" });
-    }
+    if (!qrCode) return res.status(404).json({ error: "QR Code not found" });
+    if (qrCode.isBlocked)
+      return res.status(403).json({ error: "QR Code is blocked" });
 
-    if (qrCode.isBlocked) {
-      return res.status(403).json({ error: "This QR Code is blocked" });
-    }
-
-    // Get the current date and time
     const currentDate = new Date();
     const currentHour = currentDate.getHours();
-    const formattedDate = currentDate.toISOString().split("T")[0]; // Get the current date (YYYY-MM-DD)
+    const formattedDate = currentDate.toISOString().split("T")[0];
 
-    // Check if it's a new day
     const lastScanDate = qrCode.scanDate
       ? qrCode.scanDate.toISOString().split("T")[0]
       : null;
 
-    // Reset if it's a new day
+    // ✅ New day → Save yesterday’s record before resetting
     if (lastScanDate !== formattedDate) {
-      // Save the history of the previous day if it's not already saved
       if (lastScanDate) {
-        const previousHistory = new HistoryModel({
+        await new HistoryModel({
           qrNumber: qrCode.qrNumber,
           date: lastScanDate,
           scanHistory: qrCode.scanHistory,
-        });
-        await previousHistory.save(); // Save the history for the previous day
+        }).save();
       }
 
-      // Reset the scan history for the new day
-      qrCode.scanHistory = {
-        breakfast: false,
-        lunch: false,
-        dinner: false,
-      };
-      qrCode.scanDate = formattedDate; // Update the scan date to today
+      qrCode.scanHistory = { breakfast: false, lunch: false, dinner: false };
+      qrCode.scanDate = formattedDate;
     }
 
-    // Determine the meal type based on the current time
+    // ✅ Determine meal time
     let mealTime;
-    if (currentHour >= 7 && currentHour < 12) {
-      mealTime = "breakfast";
-    } else if (currentHour >= 12 && currentHour < 16) {
-      mealTime = "lunch";
-    } else if (currentHour >= 16 && currentHour < 24) {
-      mealTime = "dinner";
-    } else {
-      return res
-        .status(404)
-        .json({ error: "Not within meal times (breakfast, lunch, or dinner)" });
-    }
+    if (currentHour >= 7 && currentHour < 12) mealTime = "breakfast";
+    else if (currentHour >= 12 && currentHour < 16) mealTime = "lunch";
+    else if (currentHour >= 16 && currentHour < 24) mealTime = "dinner";
+    else return res.status(404).json({ error: "Not within meal times" });
 
-    // Check if the meal was already scanned today
-    if (!qrCode.scanHistory[mealTime]) {
-      qrCode.scanHistory[mealTime] = true; // Mark the meal as taken
-    } else {
+    // ✅ Prevent double scan for the same meal
+    if (qrCode.scanHistory[mealTime]) {
       return res.status(404).json({ error: `${mealTime} already taken today` });
     }
 
-    // If dinner is scanned, save the history for today
+    qrCode.scanHistory[mealTime] = true;
+
+    // ✅ If dinner is last meal → Save full-day history
     if (mealTime === "dinner") {
-      const todayHistory = new HistoryModel({
+      await new HistoryModel({
         qrNumber: qrCode.qrNumber,
         date: formattedDate,
         scanHistory: qrCode.scanHistory,
-      });
-      await todayHistory.save(); // Save the history for today
+      }).save();
     }
 
-    // Save the updated QR code
+    // ✅ Save updated scan record to DB (true source of truth)
     await qrCode.save();
+
+    // ✅ Update specific QR meal-status cache (fast reads)
+    const mealCacheKey = `meal-status:${qrCode.qrNumber}`;
+    await redis.set(
+      mealCacheKey,
+      JSON.stringify(qrCode.scanHistory),
+      "EX",
+      300
+    );
+
+    // ✅ Incrementally update `all-qr-codes` cache if it exists
+    const allCacheKey = "all-qr-codes";
+    try {
+      const cachedAll = await redis.get(allCacheKey);
+      if (cachedAll) {
+        let qrList = JSON.parse(cachedAll);
+
+        // Find this QR in cached list
+        const index = qrList.findIndex(
+          (item) => item.qrNumber === qrCode.qrNumber
+        );
+        if (index !== -1) {
+          // Update the cached item with new scanHistory & scanDate
+          qrList[index].scanHistory = qrCode.scanHistory;
+          qrList[index].scanDate = qrCode.scanDate;
+        }
+
+        // Save updated list back to Redis
+        await redis.set(allCacheKey, JSON.stringify(qrList), "EX", 300);
+      }
+    } catch (cacheErr) {
+      console.error(
+        "Failed to incrementally update all-qr-codes cache:",
+        cacheErr
+      );
+      // Don't fail request if cache update fails
+    }
 
     res.status(200).json({
       message: `${mealTime} recorded successfully`,
       qrCode,
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error scanning QR Code" });
-    console.log(error);
   }
 }
 
@@ -163,27 +202,54 @@ async function getScanHistory(req, res) {
   }
 }
 
-// Block a QR code
+// block qr code
 async function blockQRCode(req, res) {
   try {
     const { qrNumber } = req.body;
 
-    // Find the QR code by its number
+    // ✅ Find the QR code by its number
     const qrCode = await QRCodeModel.findOne({ qrNumber });
 
     if (!qrCode) {
       return res.status(404).json({ error: "QR Code not found" });
     }
 
-    // Block the QR code
+    // ✅ Block the QR code
     qrCode.isBlocked = true;
     await qrCode.save();
+
+    const allCacheKey = "all-qr-codes";
+    const mealCacheKey = `meal-status:${qrNumber}`;
+
+    try {
+      // ✅ Remove meal-status cache for this QR (blocked → no more scans)
+      await redis.del(mealCacheKey);
+
+      // ✅ Incrementally update the all-qr-codes cache
+      const cachedAll = await redis.get(allCacheKey);
+      if (cachedAll) {
+        let qrList = JSON.parse(cachedAll);
+
+        // Find and update this QR in cached list
+        const index = qrList.findIndex((item) => item.qrNumber === qrNumber);
+        if (index !== -1) {
+          qrList[index].isBlocked = true;
+        }
+
+        // Save updated list back to Redis
+        await redis.set(allCacheKey, JSON.stringify(qrList), "EX", 300);
+      }
+    } catch (cacheErr) {
+      console.error("Failed to incrementally update Redis cache:", cacheErr);
+      // Don’t fail the request if cache update fails
+    }
 
     res.status(200).json({
       message: `QR Code ${qrNumber} blocked successfully`,
       qrCode,
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error blocking QR Code" });
   }
 }
@@ -193,22 +259,49 @@ async function unblockQRCode(req, res) {
   try {
     const { qrNumber } = req.body;
 
-    // Find the QR code by its number
+    // ✅ Find the QR code by its number
     const qrCode = await QRCodeModel.findOne({ qrNumber });
 
     if (!qrCode) {
       return res.status(404).json({ error: "QR Code not found" });
     }
 
-    // Unblock the QR code
+    // ✅ Unblock the QR code in DB
     qrCode.isBlocked = false;
     await qrCode.save();
+
+    const allCacheKey = "all-qr-codes";
+    const mealCacheKey = `meal-status:${qrNumber}`;
+
+    try {
+      // ✅ Remove meal-status cache (to avoid stale states after unblock)
+      await redis.del(mealCacheKey);
+
+      // ✅ Incrementally update all-qr-codes cache
+      const cachedAll = await redis.get(allCacheKey);
+      if (cachedAll) {
+        let qrList = JSON.parse(cachedAll);
+
+        // Find and update this QR entry in cached list
+        const index = qrList.findIndex((item) => item.qrNumber === qrNumber);
+        if (index !== -1) {
+          qrList[index].isBlocked = false;
+        }
+
+        // Save updated list back to Redis
+        await redis.set(allCacheKey, JSON.stringify(qrList), "EX", 300);
+      }
+    } catch (cacheErr) {
+      console.error("Failed to incrementally update Redis cache:", cacheErr);
+      // Don’t fail the request if cache update fails
+    }
 
     res.status(200).json({
       message: `QR Code ${qrNumber} unblocked successfully`,
       qrCode,
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error unblocking QR Code" });
   }
 }
@@ -216,85 +309,127 @@ async function unblockQRCode(req, res) {
 // Function to fetch today's meal status for a specific QR code
 async function getTodayMealStatus(req, res) {
   try {
-    const qrNumber = req.params.qrNumber; // Get the QR code number from the request params
+    const qrNumber = req.params.qrNumber;
+    const cacheKey = `meal-status:${qrNumber}`;
 
-    // Find the QR code by its number
-    const qrCode = await QRCodeModel.findOne({ qrNumber });
-
-    if (!qrCode) {
-      return res.status(404).json({ message: "QR Code not found" });
+    // ✅ 1️⃣ Check Redis cache first
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return res.status(200).json({
+        message: "Meal status (from cache)",
+        mealStatus: JSON.parse(cached),
+      });
     }
 
-    // Get the current date in YYYY-MM-DD format
-    const currentDate = new Date().toISOString().split("T")[0];
+    // ✅ 2️⃣ Cache miss → Fetch from DB (always source of truth)
+    const qrCode = await QRCodeModel.findOne({ qrNumber });
+    if (!qrCode) return res.status(404).json({ message: "QR Code not found" });
 
-    // Check if the scan date matches today's date
+    const now = new Date();
+    const currentDate = now.toISOString().split("T")[0];
     const lastScanDate = qrCode.scanDate
       ? qrCode.scanDate.toISOString().split("T")[0]
       : null;
 
-    // If the scan date is different from today, no meals have been taken today
-    if (lastScanDate !== currentDate) {
-      return res.status(200).json({
-        message: "No meals scanned for today",
-        mealStatus: {
-          breakfast: false,
-          lunch: false,
-          dinner: false,
-        },
-      });
+    let mealStatus = { breakfast: false, lunch: false, dinner: false };
+    if (lastScanDate === currentDate) {
+      mealStatus = qrCode.scanHistory;
     }
 
-    // Return the real-time meal status for today
-    res.status(200).json({
+    // ✅ 3️⃣ Compute TTL = seconds until midnight (to auto-expire daily)
+    const midnight = new Date(now);
+    midnight.setHours(24, 0, 0, 0);
+    const secondsUntilMidnight = Math.floor((midnight - now) / 1000);
+
+    // ✅ 4️⃣ Cache today’s meal status until midnight
+    await redis.set(
+      cacheKey,
+      JSON.stringify(mealStatus),
+      "EX",
+      secondsUntilMidnight
+    );
+
+    return res.status(200).json({
       message: "Meal status for today",
-      mealStatus: qrCode.scanHistory, // Send the scan history (breakfast, lunch, dinner)
+      mealStatus,
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error fetching meal status" });
-    console.log(error);
   }
 }
 
 //  delete qr code
 async function deleteQRCode(req, res) {
   try {
-    const { qrNumber } = req.params; // Get the QR code number from the request params
+    const { qrNumber } = req.params;
 
-    // Find and delete the QR code
+    // ✅ 1️⃣ Find and delete the QR code
     const qrCode = await QRCodeModel.findOneAndDelete({ qrNumber });
-
     if (!qrCode) {
       return res.status(404).json({ error: "QR Code not found" });
     }
 
-    // (Optional) Delete associated scan history for the QR code
+    // ✅ 2️⃣ Delete associated history
     await HistoryModel.deleteMany({ qrNumber });
+
+    // ✅ 3️⃣ Remove only the relevant Redis keys
+    const qrMealKey = `meal-status:${qrNumber}`;
+    await redis.del(qrMealKey);
+
+    // ✅ 4️⃣ Incrementally update `all-qr-codes` cache if present
+    const allCacheKey = "all-qr-codes";
+    const cachedAll = await redis.get(allCacheKey);
+
+    if (cachedAll) {
+      let allCodes = JSON.parse(cachedAll);
+      // Filter out the deleted code
+      allCodes = allCodes.filter((code) => code.qrNumber !== qrNumber);
+
+      // Update cache with new list
+      await redis.set(allCacheKey, JSON.stringify(allCodes), "EX", 300);
+    }
 
     res.status(200).json({
       message: `QR Code ${qrNumber} and its history deleted successfully`,
     });
   } catch (error) {
+    console.error(error);
     res.status(500).json({ error: "Error deleting QR Code" });
-    console.log(error);
   }
 }
 
-// get all qr-code
+// get all qr-codes with Redis cache
 async function getAllQrcode(req, res) {
-  console.log("hello worhd");
-
   try {
-    const allcode = await QRCodeModel.find();
+    const cacheKey = "all-qr-codes";
 
-    if (allcode) {
-      // console.log(allcode);
-
-      res.status(200).json({ message: allcode });
+    // 1️⃣ Try Redis cache first
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      return res.status(200).json({
+        message: "All QR codes (from cache)",
+        qrCodes: JSON.parse(cached),
+      });
     }
+
+    // 2️⃣ Cache miss → Fetch from DB
+    const allCodes = await QRCodeModel.find().lean();
+
+    if (!allCodes || allCodes.length === 0) {
+      return res.status(404).json({ message: "No QR codes found" });
+    }
+
+    // 3️⃣ Cache the result for future calls
+    await redis.set(cacheKey, JSON.stringify(allCodes), "EX", 300);
+
+    return res.status(200).json({
+      message: "All QR codes fetched successfully (from DB)",
+      qrCodes: allCodes,
+    });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ error: error.message });
+    console.error("Error fetching all QR codes:", error);
+    res.status(500).json({ error: "Error fetching all QR codes" });
   }
 }
 
