@@ -1,5 +1,6 @@
 // controllers/liveController.js
 const LiveConfig = require("../model/LiveConfig");
+const redis = require("../utils/redis");
 
 exports.updateLiveLink = async (req, res) => {
   try {
@@ -29,11 +30,39 @@ exports.updateLiveLink = async (req, res) => {
 exports.redirectToLive = async (req, res) => {
   const qrNumber = req.params.qrNumber;
 
-  // Fetch the latest live URL
-  const config = await LiveConfig.findOne().sort({ updatedAt: -1 });
-  const liveUrl = config?.currentLiveUrl || process.env.DEFAULT_LIVE_URL;
+  try {
+    // ✅ 1. First check Redis cache
+    const cacheKey = "current_live_url";
+    let liveUrl = await redis.get(cacheKey);
 
-  console.log(`QR ${qrNumber} scanned -> redirecting to ${liveUrl}`);
+    if (!liveUrl) {
+      // ✅ 2. Cache miss → fetch from DB
+      const config = await LiveConfig.findOne();
+      liveUrl = config?.currentLiveUrl || null;
 
-  res.redirect(liveUrl);
+      // ✅ Cache it for 5 mins if found
+      if (liveUrl) {
+        await redis.set(cacheKey, liveUrl, "EX", 300);
+      }
+    }
+
+    if (liveUrl) {
+      // ✅ Redirect to live URL
+      return res.redirect(liveUrl);
+    } else {
+      // ✅ Fallback message if no live URL
+      return res.send(`
+        <html>
+          <head><title>No Live Event</title></head>
+          <body style="font-family: Arial; text-align: center; margin-top: 50px;">
+            <h1>🔴 No live programme at the moment</h1>
+            <p>Please check back later.</p>
+          </body>
+        </html>
+      `);
+    }
+  } catch (error) {
+    console.error("Redirect error:", error);
+    res.status(500).send("Error fetching live programme");
+  }
 };
