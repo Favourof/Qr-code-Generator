@@ -8,7 +8,10 @@ const path = require("path");
 
 // Generate QR Code and store image in Firebase
 async function generateQRCode(req, res) {
+  let uploadedFile = null; // track file for rollback
+
   try {
+    // ✅ 1. Find last QR to get next sequential number
     const lastQRCode = await QRCodeModel.findOne().sort({ createdAt: -1 });
 
     const scanHistory = { breakfast: false, lunch: false, dinner: false };
@@ -19,56 +22,69 @@ async function generateQRCode(req, res) {
       nextNumber = String(lastNumber + 1).padStart(3, "0");
     }
 
-    // Generate buffer
-    const qrBuffer = await QRCodeLib.toBuffer(`QR Code #${nextNumber}`);
+    // ✅ 2. Build the backend redirect URL
+    const redirectUrl = `${process.env.BACKEND_BASE_URL}/api/v1/redirect/${nextNumber}`;
 
-    // Unique file name
+    // ✅ 3. Generate QR code buffer pointing to redirect URL
+    const qrBuffer = await QRCodeLib.toBuffer(redirectUrl);
+
+    // ✅ 4. Create unique filename for storage
     const fileName = `qr-code-${nextNumber}-${uuidv4()}.png`;
-    const file = bucket.file(`qr-codes/${fileName}`);
+    uploadedFile = `qr-codes/${fileName}`; // remember for rollback
+    const file = bucket.file(uploadedFile);
 
-    // Upload to Firebase
+    // ✅ 5. Upload QR PNG to Firebase Storage
     await file.save(qrBuffer, {
       metadata: {
         contentType: "image/png",
-        metadata: {
-          firebaseStorageDownloadTokens: uuidv4(),
-        },
+        metadata: { firebaseStorageDownloadTokens: uuidv4() },
       },
     });
 
-    // Make public (optional)
+    // ✅ 6. Make public (optional)
     await file.makePublic();
 
+    // ✅ 7. Get public URL of the stored QR image
     const publicUrl = `https://storage.googleapis.com/${bucket.name}/qr-codes/${fileName}`;
 
+    // ✅ 8. Create QR Code DB entry
     const newQRCode = new QRCodeModel({
       qrNumber: nextNumber,
-      qrCodeData: publicUrl, // Save link instead of base64
+      qrCodeData: publicUrl, // Firebase image link
       scanHistory,
       scanDate: null,
     });
 
+    // ✅ 9. Save QR metadata to MongoDB
     await newQRCode.save();
 
-    // Redis update (same logic)
+    // ✅ 10. Update Redis cache if it exists
     const cacheKey = "all-qr-codes";
-    try {
-      const cached = await redis.get(cacheKey);
-      if (cached) {
-        const qrList = JSON.parse(cached);
-        qrList.push(newQRCode);
-        await redis.set(cacheKey, JSON.stringify(qrList), "EX", 300);
-      }
-    } catch (err) {
-      console.error("Redis update failed:", err);
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      const qrList = JSON.parse(cached);
+      qrList.push(newQRCode);
+      await redis.set(cacheKey, JSON.stringify(qrList), "EX", 300);
     }
 
     res.status(200).json({
-      message: "QR Code generated and uploaded successfully",
+      message: "✅ QR Code generated successfully",
       qrCode: newQRCode,
+      redirectUrl, // useful for debugging
     });
-  } catch (err) {
-    console.error(err);
+  } catch (error) {
+    console.error("Error generating QR Code:", error);
+
+    // ❗ Rollback: Delete uploaded file if DB failed
+    if (uploadedFile) {
+      try {
+        await bucket.file(uploadedFile).delete();
+        console.log(`Rolled back Firebase file: ${uploadedFile}`);
+      } catch (delErr) {
+        console.error("Rollback delete failed:", delErr);
+      }
+    }
+
     res.status(500).json({ error: "Error generating QR Code" });
   }
 }
@@ -364,34 +380,49 @@ async function deleteQRCode(req, res) {
   try {
     const { qrNumber } = req.params;
 
-    // ✅ 1️⃣ Find and delete the QR code
+    // ✅ 1️⃣ Find the QR code
     const qrCode = await QRCodeModel.findOneAndDelete({ qrNumber });
     if (!qrCode) {
       return res.status(404).json({ error: "QR Code not found" });
     }
 
-    // ✅ 2️⃣ Delete associated history
+    // ✅ 2️⃣ Delete associated scan history
     await HistoryModel.deleteMany({ qrNumber });
 
-    // ✅ 3️⃣ Remove only the relevant Redis keys
+    // ✅ 3️⃣ Remove Redis meal-status cache
     const qrMealKey = `meal-status:${qrNumber}`;
     await redis.del(qrMealKey);
 
-    // ✅ 4️⃣ Incrementally update `all-qr-codes` cache if present
+    // ✅ 4️⃣ Extract Firebase filename from public URL
+    if (
+      qrCode.qrCodeData &&
+      qrCode.qrCodeData.includes("storage.googleapis.com")
+    ) {
+      // Example: https://storage.googleapis.com/<bucket-name>/qr-codes/qr-code-001-uuid.png
+      const parts = qrCode.qrCodeData.split("/qr-codes/");
+      if (parts.length === 2) {
+        const filePath = `qr-codes/${parts[1]}`;
+        try {
+          await bucket.file(filePath).delete();
+          console.log(`✅ Deleted Firebase file: ${filePath}`);
+        } catch (err) {
+          console.error(`⚠️ Failed to delete Firebase file: ${filePath}`, err);
+        }
+      }
+    }
+
+    // ✅ 5️⃣ Incrementally update `all-qr-codes` cache
     const allCacheKey = "all-qr-codes";
     const cachedAll = await redis.get(allCacheKey);
-
     if (cachedAll) {
       let allCodes = JSON.parse(cachedAll);
-      // Filter out the deleted code
+      // Filter out the deleted QR
       allCodes = allCodes.filter((code) => code.qrNumber !== qrNumber);
-
-      // Update cache with new list
       await redis.set(allCacheKey, JSON.stringify(allCodes), "EX", 300);
     }
 
     res.status(200).json({
-      message: `QR Code ${qrNumber} and its history deleted successfully`,
+      message: `QR Code ${qrNumber} & its history deleted successfully`,
     });
   } catch (error) {
     console.error(error);
