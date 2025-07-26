@@ -10,11 +10,20 @@ exports.updateLiveLink = async (req, res) => {
       return res.status(400).json({ message: "Live URL is required" });
     }
 
-    // ✅ Save a new config entry
-    const updatedConfig = await LiveConfig.create({
-      currentLiveUrl: newLiveUrl,
-      updatedBy: req.user?.email || "admin",
-    });
+    // ✅ Replace existing config (or create if none)
+    const updatedConfig = await LiveConfig.findOneAndUpdate(
+      {},
+      {
+        currentLiveUrl: newLiveUrl,
+        updatedBy: req.user?.email || "admin",
+      },
+      { new: true, upsert: true }
+    );
+
+    // ✅ Refresh Redis cache (remove old & set new)
+    const cacheKey = "current_live_url";
+    await redis.del(cacheKey);
+    await redis.set(cacheKey, newLiveUrl, "EX", 300);
 
     res.json({
       message: "Live programme link updated successfully",
@@ -26,13 +35,11 @@ exports.updateLiveLink = async (req, res) => {
   }
 };
 
-// ✅ Anyone scanning a QR code will get redirected
 exports.redirectToLive = async (req, res) => {
-  const qrNumber = req.params.qrNumber;
-
   try {
-    // ✅ 1. First check Redis cache
     const cacheKey = "current_live_url";
+
+    // ✅ 1. Try Redis cache first
     let liveUrl = await redis.get(cacheKey);
 
     if (!liveUrl) {
@@ -40,17 +47,14 @@ exports.redirectToLive = async (req, res) => {
       const config = await LiveConfig.findOne();
       liveUrl = config?.currentLiveUrl || null;
 
-      // ✅ Cache it for 5 mins if found
       if (liveUrl) {
-        await redis.set(cacheKey, liveUrl, "EX", 300);
+        await redis.set(cacheKey, liveUrl, "EX", 300); // refresh cache
       }
     }
 
     if (liveUrl) {
-      // ✅ Redirect to live URL
       return res.redirect(liveUrl);
     } else {
-      // ✅ Fallback message if no live URL
       return res.send(`
         <html>
           <head><title>No Live Event</title></head>
